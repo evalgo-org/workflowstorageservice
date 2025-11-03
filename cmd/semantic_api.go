@@ -28,13 +28,14 @@ type SemanticMediaObject struct {
 	Text           string `json:"text,omitempty"` // Inline data
 }
 
-// SemanticRetrieveAction represents a Retrieve/Download action  
+// SemanticRetrieveAction represents a Retrieve/Download action (Schema.org compliant)
 type SemanticRetrieveAction struct {
 	Context    string               `json:"@context,omitempty"`
 	Type       string               `json:"@type"`
 	Identifier string               `json:"identifier"`
 	Name       string               `json:"name,omitempty"`
-	Target     *SemanticMediaObject `json:"target,omitempty"`
+	Object     *SemanticMediaObject `json:"object,omitempty"` // What to retrieve (resource s3:// location)
+	Target     interface{}          `json:"target,omitempty"` // Where to execute (service endpoint) - optional, for future use
 	Result     *SemanticMediaObject `json:"result,omitempty"`
 }
 
@@ -108,15 +109,15 @@ func handleSemanticStore(c echo.Context, rawAction map[string]interface{}) error
 	}
 
 	reqBytes, _ := json.Marshal(storeReq)
-	
+
 	// Create new request context for store handler
 	req, _ := http.NewRequest("POST", "/v1/api/store", bytes.NewReader(reqBytes))
 	req.Header.Set("Content-Type", "application/json")
 	rec := c.Response().Writer
-	
+
 	e := c.Echo()
 	ctx := e.NewContext(req, rec.(*echo.Response))
-	
+
 	return handleStore(ctx)
 }
 
@@ -127,14 +128,21 @@ func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) er
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid action structure"})
 	}
 
-	// Extract key from target
-	if action.Target == nil || action.Target.ContentURL == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "target.contentUrl is required"})
+	// Extract s3:// URL from object (correct Schema.org)
+	var contentURL string
+
+	if action.Object != nil && action.Object.ContentURL != "" {
+		contentURL = action.Object.ContentURL
+	}
+
+	if contentURL == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "object.contentUrl is required (resource s3:// location)",
+		})
 	}
 
 	// Parse s3:// URL
 	// Format: s3://bucket/workflow-results/workflowId/actionId.json
-	contentURL := action.Target.ContentURL
 	if len(contentURL) < 6 || contentURL[:5] != "s3://" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "only s3:// URLs supported"})
 	}
@@ -150,11 +158,11 @@ func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) er
 	// Create new context with key parameter
 	req, _ := http.NewRequest("GET", "/v1/api/fetch/"+key, nil)
 	rec := c.Response().Writer
-	
+
 	e := c.Echo()
 	ctx := e.NewContext(req, rec.(*echo.Response))
 	ctx.SetParamNames("key")
 	ctx.SetParamValues(key)
-	
+
 	return handleFetch(ctx)
 }
