@@ -3,7 +3,7 @@ module workflowstorageservice.evalgo.org
 go 1.25.3
 
 require (
-	eve.evalgo.org v0.0.0
+	eve.evalgo.org v0.0.28
 	github.com/aws/aws-sdk-go-v2 v1.39.5
 	github.com/aws/aws-sdk-go-v2/config v1.31.16
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.20
