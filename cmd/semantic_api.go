@@ -2,11 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/labstack/echo/v4"
 )
 
@@ -100,25 +107,39 @@ func handleSemanticStore(c echo.Context, rawAction map[string]interface{}) error
 		format = "application/json"
 	}
 
-	// Store the data
-	storeReq := StoreRequest{
-		WorkflowID: workflowID,
-		ActionID:   action.Identifier,
-		Data:       data,
-		Format:     format,
+	// Store the data directly (avoiding context creation issues)
+	bucket := os.Getenv("HETZNER_S3_BUCKET")
+	if bucket == "" {
+		bucket = "px-semantic"
 	}
 
-	reqBytes, _ := json.Marshal(storeReq)
+	key := fmt.Sprintf("workflow-results/%s/%s.json", workflowID, action.Identifier)
 
-	// Create new request context for store handler
-	req, _ := http.NewRequest("POST", "/v1/api/store", bytes.NewReader(reqBytes))
-	req.Header.Set("Content-Type", "application/json")
-	rec := c.Response().Writer
+	// Upload to S3
+	dataBytes := []byte(data)
+	_, err := s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(dataBytes),
+		ContentType: aws.String(format),
+	})
+	if err != nil {
+		log.Printf("Failed to upload to S3: %v", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to store data"})
+	}
 
-	e := c.Echo()
-	ctx := e.NewContext(req, rec.(*echo.Response))
+	log.Printf("Stored workflow result via semantic action: %s (size: %d bytes)", key, len(dataBytes))
 
-	return handleStore(ctx)
+	// Return semantic response with Schema.org compliant structure
+	response := StoreResponse{
+		Type:           "DataDownload",
+		ID:             fmt.Sprintf("#%s-result", action.Identifier),
+		ContentURL:     fmt.Sprintf("s3://%s/%s", bucket, key),
+		EncodingFormat: format,
+		ContentSize:    int64(len(dataBytes)),
+	}
+
+	return c.JSON(http.StatusOK, response)
 }
 
 func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) error {
@@ -155,14 +176,119 @@ func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) er
 
 	key := strings.Join(parts[1:], "/")
 
-	// Create new context with key parameter
-	req, _ := http.NewRequest("GET", "/v1/api/fetch/"+key, nil)
-	rec := c.Response().Writer
+	// Fetch data from S3 directly
+	bucket := os.Getenv("HETZNER_S3_BUCKET")
+	if bucket == "" {
+		bucket = "px-semantic"
+	}
 
-	e := c.Echo()
-	ctx := e.NewContext(req, rec.(*echo.Response))
-	ctx.SetParamNames("key")
-	ctx.SetParamValues(key)
+	// Download from S3
+	result, err := s3Client.GetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		log.Printf("Failed to fetch from S3: %v", err)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "data not found"})
+	}
+	defer func() {
+		if err := result.Body.Close(); err != nil {
+			log.Printf("Failed to close S3 response body: %v", err)
+		}
+	}()
 
-	return handleFetch(ctx)
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read data"})
+	}
+
+	contentType := "application/json"
+	if result.ContentType != nil {
+		contentType = *result.ContentType
+	}
+
+	log.Printf("Fetched workflow result via semantic action: %s (size: %d bytes)", key, len(data))
+
+	// Check if result should be written to file
+	var outputFile string
+
+	// First check additionalProperty.outputFile
+	if props, ok := rawAction["additionalProperty"].(map[string]interface{}); ok {
+		if of, ok := props["outputFile"].(string); ok {
+			outputFile = of
+			log.Printf("DEBUG: Found outputFile in additionalProperty: %s", outputFile)
+		}
+	}
+
+	// Fallback to result.contentUrl if present
+	if outputFile == "" {
+		if resultMap, ok := rawAction["result"].(map[string]interface{}); ok {
+			if contentUrl, ok := resultMap["contentUrl"].(string); ok {
+				outputFile = contentUrl
+				log.Printf("DEBUG: Found contentUrl in result: %s", outputFile)
+			} else {
+				log.Printf("DEBUG: result exists but contentUrl not found or not a string: %#v", resultMap)
+			}
+		} else {
+			log.Printf("DEBUG: result field not found in rawAction")
+		}
+	}
+
+	// Check for outputType in additionalProperty
+	outputType := "inline"
+	if props, ok := rawAction["additionalProperty"].(map[string]interface{}); ok {
+		if ot, ok := props["outputType"].(string); ok {
+			outputType = ot
+		}
+	}
+
+	// Write to file if outputFile is specified or outputType is "file"
+	if outputFile != "" || outputType == "file" {
+		// If no outputFile specified but outputType is "file", generate a default path
+		if outputFile == "" {
+			outputFile = fmt.Sprintf("/tmp/%s-result.dat", action.Identifier)
+		}
+
+		// Ensure parent directory exists
+		dir := filepath.Dir(outputFile)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("Failed to create output directory: %v", err),
+			})
+		}
+
+		// Write result to file (preserve semantic structure)
+		if err := os.WriteFile(outputFile, data, 0644); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("Failed to write result to file: %v", err),
+			})
+		}
+
+		log.Printf("Wrote workflow result to file: %s", outputFile)
+
+		// Return response with file reference
+		response := map[string]interface{}{
+			"@context":     "https://schema.org",
+			"@type":        "RetrieveAction",
+			"identifier":   action.Identifier,
+			"actionStatus": "CompletedActionStatus",
+			"result": map[string]interface{}{
+				"@type":          "MediaObject",
+				"contentUrl":     outputFile,
+				"encodingFormat": contentType,
+				"contentSize":    int64(len(data)),
+			},
+		}
+
+		return c.JSON(http.StatusOK, response)
+	}
+
+	// Default: return inline result
+	response := FetchResponse{
+		Data:           string(data),
+		EncodingFormat: contentType,
+		ContentSize:    int64(len(data)),
+	}
+
+	return c.JSON(http.StatusOK, response)
 }

@@ -1,35 +1,38 @@
 package main
 
 import (
-	"log"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
+	"eve.evalgo.org/common"
+	evehttp "eve.evalgo.org/http"
 	"eve.evalgo.org/registry"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
 
 func main() {
+	// Initialize logger
+	logger := common.ServiceLogger("workflowstorageservice", "1.0.0")
+
 	e := echo.New()
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
 
-	// Health check
-	e.GET("/health", func(c echo.Context) error {
-		return c.JSON(200, map[string]string{
-			"service": "workflowstorageservice",
-			"status":  "healthy",
-		})
-	})
+	// EVE health check
+	e.GET("/health", evehttp.HealthCheckHandler("workflowstorageservice", "1.0.0"))
 
 	// API routes
 	e.POST("/v1/api/store", handleStore)
 	e.GET("/v1/api/fetch/:key", handleFetch)
-	e.POST("/v1/api/semantic/action", handleSemanticAction)
+
+	// Semantic API endpoint with EVE API key middleware
+	apiKey := os.Getenv("WORKFLOW_STORAGE_API_KEY")
+	apiKeyMiddleware := evehttp.APIKeyMiddleware(apiKey)
+	e.POST("/v1/api/semantic/action", handleSemanticAction, apiKeyMiddleware)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -48,14 +51,14 @@ func main() {
 		Capabilities: []string{"workflow-storage", "data-storage", "semantic-actions"},
 	})
 	if err != nil {
-		log.Printf("Failed to register with registry: %v", err)
+		logger.WithError(err).Error("Failed to register with registry")
 	}
 
 	// Start server in goroutine
 	go func() {
-		log.Printf("workflowstorageservice starting on port %s", port)
+		logger.Infof("workflowstorageservice starting on port %s", port)
 		if err := e.Start(":" + port); err != nil {
-			log.Printf("Server error: %v", err)
+			logger.WithError(err).Error("Server error")
 		}
 	}()
 
@@ -64,17 +67,17 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
+	logger.Info("Shutting down server...")
 
 	// Unregister from registry
 	if err := registry.AutoUnregister("workflowstorageservice"); err != nil {
-		log.Printf("Failed to unregister: %v", err)
+		logger.WithError(err).Error("Failed to unregister")
 	}
 
 	// Shutdown server
 	if err := e.Close(); err != nil {
-		log.Printf("Error during shutdown: %v", err)
+		logger.WithError(err).Error("Error during shutdown")
 	}
 
-	log.Println("Server stopped")
+	logger.Info("Server stopped")
 }
