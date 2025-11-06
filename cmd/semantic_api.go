@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -12,71 +11,36 @@ import (
 	"path/filepath"
 	"strings"
 
+	"eve.evalgo.org/semantic"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/labstack/echo/v4"
 )
 
-// SemanticStoreAction represents a Store/Upload action
-type SemanticStoreAction struct {
-	Context    string                 `json:"@context,omitempty"`
-	Type       string                 `json:"@type"`
-	Identifier string                 `json:"identifier"`
-	Name       string                 `json:"name,omitempty"`
-	Object     *SemanticMediaObject   `json:"object,omitempty"`
-	Target     map[string]interface{} `json:"target,omitempty"`
-}
-
-// SemanticMediaObject represents data to be stored
-type SemanticMediaObject struct {
-	Type           string `json:"@type,omitempty"`
-	ContentURL     string `json:"contentUrl,omitempty"`
-	EncodingFormat string `json:"encodingFormat,omitempty"`
-	Text           string `json:"text,omitempty"` // Inline data
-}
-
-// SemanticRetrieveAction represents a Retrieve/Download action (Schema.org compliant)
-type SemanticRetrieveAction struct {
-	Context    string               `json:"@context,omitempty"`
-	Type       string               `json:"@type"`
-	Identifier string               `json:"identifier"`
-	Name       string               `json:"name,omitempty"`
-	Object     *SemanticMediaObject `json:"object,omitempty"` // What to retrieve (resource s3:// location)
-	Target     interface{}          `json:"target,omitempty"` // Where to execute (service endpoint) - optional, for future use
-	Result     *SemanticMediaObject `json:"result,omitempty"`
-}
-
 func handleSemanticAction(c echo.Context) error {
-	// Parse raw JSON to detect action type
-	var rawAction map[string]interface{}
-	if err := c.Bind(&rawAction); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid JSON-LD"})
+	// Parse semantic action
+	buf := new(bytes.Buffer)
+	if _, err := buf.ReadFrom(c.Request().Body); err != nil {
+		return semantic.ReturnActionError(c, nil, "Failed to read request body", err)
+	}
+	bodyBytes := buf.Bytes()
+
+	action, err := semantic.ParseSemanticAction(bodyBytes)
+	if err != nil {
+		return semantic.ReturnActionError(c, nil, "Failed to parse semantic action", err)
 	}
 
-	actionType, ok := rawAction["@type"].(string)
-	if !ok {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "@type is required"})
-	}
-
-	switch actionType {
+	switch action.Type {
 	case "UploadAction", "CreateAction", "StoreAction":
-		return handleSemanticStore(c, rawAction)
+		return handleSemanticStore(c, action)
 	case "DownloadAction", "RetrieveAction", "FetchAction":
-		return handleSemanticRetrieve(c, rawAction)
+		return handleSemanticRetrieve(c, action)
 	default:
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("unsupported action type: %s", actionType),
-		})
+		return semantic.ReturnActionError(c, action, fmt.Sprintf("Unsupported action type: %s", action.Type), nil)
 	}
 }
 
-func handleSemanticStore(c echo.Context, rawAction map[string]interface{}) error {
-	actionBytes, _ := json.Marshal(rawAction)
-	var action SemanticStoreAction
-	if err := json.Unmarshal(actionBytes, &action); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid action structure"})
-	}
-
+func handleSemanticStore(c echo.Context, action *semantic.SemanticAction) error {
 	// Extract workflow context from properties or headers
 	workflowID := c.Request().Header.Get("X-Workflow-ID")
 	if workflowID == "" {
@@ -84,30 +48,30 @@ func handleSemanticStore(c echo.Context, rawAction map[string]interface{}) error
 	}
 
 	// Get data to store
+	if action.Object == nil {
+		return semantic.ReturnActionError(c, action, "object is required", nil)
+	}
+
 	var data string
 	var format string
 
-	if action.Object != nil {
-		if action.Object.Text != "" {
-			data = action.Object.Text
-		} else if action.Object.ContentURL != "" {
-			// TODO: Fetch from URL
-			return c.JSON(http.StatusNotImplemented, map[string]string{
-				"error": "fetching from contentUrl not yet implemented",
-			})
-		}
-		format = action.Object.EncodingFormat
+	if action.Object.Text != "" {
+		data = action.Object.Text
+	} else if action.Object.ContentUrl != "" {
+		// TODO: Fetch from URL
+		return semantic.ReturnActionError(c, action, "fetching from contentUrl not yet implemented", nil)
 	}
 
-	if data == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "no data to store"})
-	}
-
+	format = action.Object.EncodingFormat
 	if format == "" {
 		format = "application/json"
 	}
 
-	// Store the data directly (avoiding context creation issues)
+	if data == "" {
+		return semantic.ReturnActionError(c, action, "no data to store", nil)
+	}
+
+	// Store the data
 	bucket := os.Getenv("HETZNER_S3_BUCKET")
 	if bucket == "" {
 		bucket = "px-semantic"
@@ -125,53 +89,44 @@ func handleSemanticStore(c echo.Context, rawAction map[string]interface{}) error
 	})
 	if err != nil {
 		log.Printf("Failed to upload to S3: %v", err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to store data"})
+		return semantic.ReturnActionError(c, action, "Failed to store data", err)
 	}
 
 	log.Printf("Stored workflow result via semantic action: %s (size: %d bytes)", key, len(dataBytes))
 
-	// Return semantic response with Schema.org compliant structure
-	response := StoreResponse{
-		Type:           "DataDownload",
-		ID:             fmt.Sprintf("#%s-result", action.Identifier),
-		ContentURL:     fmt.Sprintf("s3://%s/%s", bucket, key),
-		EncodingFormat: format,
-		ContentSize:    int64(len(dataBytes)),
+	// Set result in action
+	action.Properties["result"] = map[string]interface{}{
+		"@type":          "DataDownload",
+		"contentUrl":     fmt.Sprintf("s3://%s/%s", bucket, key),
+		"encodingFormat": format,
+		"contentSize":    int64(len(dataBytes)),
 	}
 
-	return c.JSON(http.StatusOK, response)
+	semantic.SetSuccessOnAction(action)
+	return c.JSON(http.StatusOK, action)
 }
 
-func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) error {
-	actionBytes, _ := json.Marshal(rawAction)
-	var action SemanticRetrieveAction
-	if err := json.Unmarshal(actionBytes, &action); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid action structure"})
+func handleSemanticRetrieve(c echo.Context, action *semantic.SemanticAction) error {
+	// Extract s3:// URL from object
+	if action.Object == nil {
+		return semantic.ReturnActionError(c, action, "object is required", nil)
 	}
 
-	// Extract s3:// URL from object (correct Schema.org)
-	var contentURL string
-
-	if action.Object != nil && action.Object.ContentURL != "" {
-		contentURL = action.Object.ContentURL
-	}
-
+	contentURL := action.Object.ContentUrl
 	if contentURL == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "object.contentUrl is required (resource s3:// location)",
-		})
+		return semantic.ReturnActionError(c, action, "object.contentUrl is required (resource s3:// location)", nil)
 	}
 
 	// Parse s3:// URL
 	// Format: s3://bucket/workflow-results/workflowId/actionId.json
 	if len(contentURL) < 6 || contentURL[:5] != "s3://" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "only s3:// URLs supported"})
+		return semantic.ReturnActionError(c, action, "only s3:// URLs supported", nil)
 	}
 
 	// Remove s3://bucket/ prefix to get key
 	parts := strings.Split(contentURL[5:], "/")
 	if len(parts) < 2 {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid s3 URL format"})
+		return semantic.ReturnActionError(c, action, "invalid s3 URL format", nil)
 	}
 
 	key := strings.Join(parts[1:], "/")
@@ -189,7 +144,7 @@ func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) er
 	})
 	if err != nil {
 		log.Printf("Failed to fetch from S3: %v", err)
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "data not found"})
+		return semantic.ReturnActionError(c, action, "data not found", err)
 	}
 	defer func() {
 		if err := result.Body.Close(); err != nil {
@@ -199,7 +154,7 @@ func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) er
 
 	data, err := io.ReadAll(result.Body)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read data"})
+		return semantic.ReturnActionError(c, action, "failed to read data", err)
 	}
 
 	contentType := "application/json"
@@ -212,32 +167,18 @@ func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) er
 	// Check if result should be written to file
 	var outputFile string
 
-	// First check additionalProperty.outputFile
-	if props, ok := rawAction["additionalProperty"].(map[string]interface{}); ok {
-		if of, ok := props["outputFile"].(string); ok {
+	// Check additionalProperty for outputFile
+	if action.Properties != nil {
+		if of, ok := action.Properties["outputFile"].(string); ok {
 			outputFile = of
-			log.Printf("DEBUG: Found outputFile in additionalProperty: %s", outputFile)
+			log.Printf("DEBUG: Found outputFile in Properties: %s", outputFile)
 		}
 	}
 
-	// Fallback to result.contentUrl if present
-	if outputFile == "" {
-		if resultMap, ok := rawAction["result"].(map[string]interface{}); ok {
-			if contentUrl, ok := resultMap["contentUrl"].(string); ok {
-				outputFile = contentUrl
-				log.Printf("DEBUG: Found contentUrl in result: %s", outputFile)
-			} else {
-				log.Printf("DEBUG: result exists but contentUrl not found or not a string: %#v", resultMap)
-			}
-		} else {
-			log.Printf("DEBUG: result field not found in rawAction")
-		}
-	}
-
-	// Check for outputType in additionalProperty
+	// Check for outputType in Properties
 	outputType := "inline"
-	if props, ok := rawAction["additionalProperty"].(map[string]interface{}); ok {
-		if ot, ok := props["outputType"].(string); ok {
+	if action.Properties != nil {
+		if ot, ok := action.Properties["outputType"].(string); ok {
 			outputType = ot
 		}
 	}
@@ -252,43 +193,33 @@ func handleSemanticRetrieve(c echo.Context, rawAction map[string]interface{}) er
 		// Ensure parent directory exists
 		dir := filepath.Dir(outputFile)
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": fmt.Sprintf("Failed to create output directory: %v", err),
-			})
+			return semantic.ReturnActionError(c, action, "Failed to create output directory", err)
 		}
 
-		// Write result to file (preserve semantic structure)
+		// Write result to file
 		if err := os.WriteFile(outputFile, data, 0644); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": fmt.Sprintf("Failed to write result to file: %v", err),
-			})
+			return semantic.ReturnActionError(c, action, "Failed to write result to file", err)
 		}
 
 		log.Printf("Wrote workflow result to file: %s", outputFile)
 
-		// Return response with file reference
-		response := map[string]interface{}{
-			"@context":     "https://schema.org",
-			"@type":        "RetrieveAction",
-			"identifier":   action.Identifier,
-			"actionStatus": "CompletedActionStatus",
-			"result": map[string]interface{}{
-				"@type":          "MediaObject",
-				"contentUrl":     outputFile,
-				"encodingFormat": contentType,
-				"contentSize":    int64(len(data)),
-			},
+		// Set result in action
+		action.Properties["result"] = map[string]interface{}{
+			"@type":          "MediaObject",
+			"contentUrl":     outputFile,
+			"encodingFormat": contentType,
+			"contentSize":    int64(len(data)),
 		}
-
-		return c.JSON(http.StatusOK, response)
+	} else {
+		// Return inline result
+		action.Properties["result"] = map[string]interface{}{
+			"@type":          "MediaObject",
+			"text":           string(data),
+			"encodingFormat": contentType,
+			"contentSize":    int64(len(data)),
+		}
 	}
 
-	// Default: return inline result
-	response := FetchResponse{
-		Data:           string(data),
-		EncodingFormat: contentType,
-		ContentSize:    int64(len(data)),
-	}
-
-	return c.JSON(http.StatusOK, response)
+	semantic.SetSuccessOnAction(action)
+	return c.JSON(http.StatusOK, action)
 }
