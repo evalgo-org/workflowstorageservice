@@ -39,17 +39,37 @@ func main() {
 			{
 				Method:      "POST",
 				Path:        "/v1/api/semantic/action",
-				Description: "Execute storage operations via semantic actions",
+				Description: "Execute storage operations via semantic actions (primary interface)",
+			},
+			{
+				Method:      "POST",
+				Path:        "/v1/api/workflows",
+				Description: "Store workflow (REST convenience - converts to CreateAction)",
+			},
+			{
+				Method:      "GET",
+				Path:        "/v1/api/workflows/:id",
+				Description: "Retrieve workflow (REST convenience - converts to RetrieveAction)",
+			},
+			{
+				Method:      "PUT",
+				Path:        "/v1/api/workflows/:id",
+				Description: "Update workflow (REST convenience - converts to UpdateAction)",
+			},
+			{
+				Method:      "DELETE",
+				Path:        "/v1/api/workflows/:id",
+				Description: "Delete workflow (REST convenience - converts to DeleteAction)",
 			},
 			{
 				Method:      "POST",
 				Path:        "/v1/api/store",
-				Description: "Store workflow data",
+				Description: "Store workflow data (legacy)",
 			},
 			{
 				Method:      "GET",
 				Path:        "/v1/api/fetch/:key",
-				Description: "Fetch workflow data by key",
+				Description: "Fetch workflow data by key (legacy)",
 			},
 			{
 				Method:      "GET",
@@ -69,14 +89,19 @@ func main() {
 	apiGroup := e.Group("/v1/api")
 	sm.RegisterRoutes(apiGroup)
 
-	// API routes
+	// Legacy API routes
 	e.POST("/v1/api/store", handleStore)
 	e.GET("/v1/api/fetch/:key", handleFetch)
 
-	// Semantic API endpoint with EVE API key middleware
+	// EVE API Key middleware
 	apiKey := os.Getenv("WORKFLOW_STORAGE_API_KEY")
 	apiKeyMiddleware := evehttp.APIKeyMiddleware(apiKey)
-	e.POST("/v1/api/semantic/action", handleSemanticAction, apiKeyMiddleware)
+
+	// Semantic action endpoint (primary interface)
+	apiGroup.POST("/semantic/action", handleSemanticAction, apiKeyMiddleware)
+
+	// REST endpoints (convenience adapters that convert to semantic actions)
+	registerRESTEndpoints(apiGroup, apiKeyMiddleware)
 
 	port := os.Getenv("PORT")
 	if port == "" {
