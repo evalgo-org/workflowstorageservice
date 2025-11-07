@@ -48,7 +48,7 @@ func main() {
 		Port:         portInt,
 		Directory:    "/home/opunix/workflowstorageservice",
 		Binary:       "workflowstorageservice",
-		Capabilities: []string{"workflow-storage", "data-storage", "semantic-actions"},
+		Capabilities: []string{"document-storage", "workflow-storage", "data-storage"},
 	})
 	if err != nil {
 		logger.WithError(err).Error("Failed to register with registry")
