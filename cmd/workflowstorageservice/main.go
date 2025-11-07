@@ -29,11 +29,11 @@ func main() {
 
 	// Documentation endpoint
 	e.GET("/v1/api/docs", evehttp.DocumentationHandler(evehttp.ServiceDocConfig{
-		ServiceID:   "workflowstorageservice",
-		ServiceName: "Workflow Storage Service",
-		Description: "Storage and retrieval service for workflow definitions and data",
-		Version:     "v1",
-		Port:        8094,
+		ServiceID:    "workflowstorageservice",
+		ServiceName:  "Workflow Storage Service",
+		Description:  "Storage and retrieval service for workflow definitions and data",
+		Version:      "v1",
+		Port:         8094,
 		Capabilities: []string{"document-storage", "workflow-storage", "data-storage"},
 		Endpoints: []evehttp.EndpointDoc{
 			{
