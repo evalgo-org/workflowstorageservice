@@ -1,6 +1,7 @@
 package main
 
 import (
+    "eve.evalgo.org/web"
 	"fmt"
 	"os"
 	"os/signal"
@@ -21,6 +22,9 @@ func main() {
 	logger := common.ServiceLogger("workflowstorageservice", "1.0.0")
 
 	e := echo.New()
+    
+    // Register EVE corporate identity assets
+    web.RegisterAssets(e)
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
