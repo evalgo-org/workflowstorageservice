@@ -11,6 +11,7 @@ import (
 	evehttp "eve.evalgo.org/http"
 	"eve.evalgo.org/registry"
 	"eve.evalgo.org/statemanager"
+	"eve.evalgo.org/tracing"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -23,6 +24,14 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
+
+	// Initialize tracing (gracefully disabled if unavailable)
+	if tracer := tracing.Init(tracing.InitConfig{
+		ServiceID:        "workflowstorageservice",
+		DisableIfMissing: true,
+	}); tracer != nil {
+		e.Use(tracer.Middleware())
+	}
 
 	// EVE health check
 	e.GET("/health", evehttp.HealthCheckHandler("workflowstorageservice", "1.0.0"))
