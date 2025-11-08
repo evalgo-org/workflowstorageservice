@@ -330,6 +330,6 @@ Copyright 2025 evalgo.org
 
 ## Links
 
-- [EVE Documentation](../when/docs/)
+- [EVE Documentation](https://eve.evalgo.org)
 - [REST Endpoint Design](../when/REST_ENDPOINT_DESIGN.md)
 - [Schema.org Actions](https://schema.org/Action)
