@@ -6,7 +6,7 @@
 *.dylib
 
 # Go build artifacts
-workflowstorageservice
+/workflowstorageservice
 /cmd/workflowstorageservice/workflowstorageservice
 *.test
 *.out
