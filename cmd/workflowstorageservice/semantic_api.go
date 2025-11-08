@@ -30,14 +30,9 @@ func handleSemanticAction(c echo.Context) error {
 		return semantic.ReturnActionError(c, nil, "Failed to parse semantic action", err)
 	}
 
-	switch action.Type {
-	case "UploadAction", "CreateAction", "StoreAction":
-		return handleSemanticStore(c, action)
-	case "DownloadAction", "RetrieveAction", "FetchAction":
-		return handleSemanticRetrieve(c, action)
-	default:
-		return semantic.ReturnActionError(c, action, fmt.Sprintf("Unsupported action type: %s", action.Type), nil)
-	}
+	// Dispatch to registered handler using the ActionRegistry
+	// No switch statement needed - handlers are registered at startup
+	return semantic.Handle(c, action)
 }
 
 func handleSemanticStore(c echo.Context, action *semantic.SemanticAction) error {
