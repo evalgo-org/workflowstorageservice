@@ -1,12 +1,13 @@
 package main
 
 import (
-    "eve.evalgo.org/web"
 	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
+
+	"eve.evalgo.org/web"
 
 	"eve.evalgo.org/common"
 	evehttp "eve.evalgo.org/http"
@@ -32,9 +33,9 @@ func main() {
 	semantic.MustRegister("FetchAction", handleSemanticRetrieve)
 
 	e := echo.New()
-    
-    // Register EVE corporate identity assets
-    web.RegisterAssets(e)
+
+	// Register EVE corporate identity assets
+	web.RegisterAssets(e)
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
@@ -131,13 +132,20 @@ func main() {
 		port = "8094"
 	}
 
-	// Auto-register with registry service if REGISTRYSERVICE_API_URL is set
+	// Get service URL from environment (for Docker container names) or default to localhost
 	portInt, _ := strconv.Atoi(port)
+	serviceURL := os.Getenv("WORKFLOWSTORAGE_SERVICE_URL")
+	if serviceURL == "" {
+		serviceURL = fmt.Sprintf("http://localhost:%d", portInt)
+	}
+
+	// Auto-register with registry service if REGISTRYSERVICE_API_URL is set
 	_, err := registry.AutoRegister(registry.AutoRegisterConfig{
 		ServiceID:    "workflowstorageservice",
 		ServiceName:  "Workflow Storage Service",
 		Description:  "Storage and retrieval service for workflow definitions and data",
 		Port:         portInt,
+		ServiceURL:   serviceURL,
 		Directory:    "/home/opunix/workflowstorageservice",
 		Binary:       "workflowstorageservice",
 		Version:      "v1",
@@ -145,8 +153,8 @@ func main() {
 		APIVersions: []registry.APIVersion{
 			{
 				Version:       "v1",
-				URL:           fmt.Sprintf("http://localhost:%d/v1", portInt),
-				Documentation: fmt.Sprintf("http://localhost:%d/v1/api/docs", portInt),
+				URL:           fmt.Sprintf("%s/v1", serviceURL),
+				Documentation: fmt.Sprintf("%s/v1/api/docs", serviceURL),
 				IsDefault:     true,
 				Status:        "stable",
 				ReleaseDate:   "2024-01-01",
