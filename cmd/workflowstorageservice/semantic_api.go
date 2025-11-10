@@ -35,7 +35,7 @@ func handleSemanticAction(c echo.Context) error {
 	return semantic.Handle(c, action)
 }
 
-func handleSemanticStore(c echo.Context, action *semantic.SemanticAction) error {
+func handleSemanticStoreImpl(c echo.Context, action *semantic.SemanticAction) error {
 	// Extract workflow context from properties or headers
 	workflowID := c.Request().Header.Get("X-Workflow-ID")
 	if workflowID == "" {
@@ -89,19 +89,22 @@ func handleSemanticStore(c echo.Context, action *semantic.SemanticAction) error 
 
 	log.Printf("Stored workflow result via semantic action: %s (size: %d bytes)", key, len(dataBytes))
 
-	// Set result in action
-	action.Properties["result"] = map[string]interface{}{
-		"@type":          "DataDownload",
-		"contentUrl":     fmt.Sprintf("s3://%s/%s", bucket, key),
-		"encodingFormat": format,
-		"contentSize":    int64(len(dataBytes)),
+	// Use semantic Result structure
+	action.Result = &semantic.SemanticResult{
+		Type:   "DigitalDocument",
+		Format: format,
+		Value: map[string]interface{}{
+			"contentUrl":     fmt.Sprintf("s3://%s/%s", bucket, key),
+			"encodingFormat": format,
+			"contentSize":    int64(len(dataBytes)),
+		},
 	}
 
 	semantic.SetSuccessOnAction(action)
 	return c.JSON(http.StatusOK, action)
 }
 
-func handleSemanticRetrieve(c echo.Context, action *semantic.SemanticAction) error {
+func handleSemanticRetrieveImpl(c echo.Context, action *semantic.SemanticAction) error {
 	// Extract s3:// URL from object
 	if action.Object == nil {
 		return semantic.ReturnActionError(c, action, "object is required", nil)
@@ -198,23 +201,46 @@ func handleSemanticRetrieve(c echo.Context, action *semantic.SemanticAction) err
 
 		log.Printf("Wrote workflow result to file: %s", outputFile)
 
-		// Set result in action
-		action.Properties["result"] = map[string]interface{}{
-			"@type":          "MediaObject",
-			"contentUrl":     outputFile,
-			"encodingFormat": contentType,
-			"contentSize":    int64(len(data)),
+		// Use semantic Result structure for file output
+		action.Result = &semantic.SemanticResult{
+			Type:   "DigitalDocument",
+			Format: contentType,
+			Value: map[string]interface{}{
+				"contentUrl":     outputFile,
+				"encodingFormat": contentType,
+				"contentSize":    int64(len(data)),
+			},
 		}
 	} else {
 		// Return inline result
-		action.Properties["result"] = map[string]interface{}{
-			"@type":          "MediaObject",
-			"text":           string(data),
-			"encodingFormat": contentType,
-			"contentSize":    int64(len(data)),
+		action.Result = &semantic.SemanticResult{
+			Type:   "Dataset",
+			Format: contentType,
+			Output: string(data),
+			Value: map[string]interface{}{
+				"contentSize": int64(len(data)),
+			},
 		}
 	}
 
 	semantic.SetSuccessOnAction(action)
 	return c.JSON(http.StatusOK, action)
+}
+
+// handleSemanticStore wraps the implementation to match ActionHandler signature
+func handleSemanticStore(c echo.Context, actionInterface interface{}) error {
+	action, ok := actionInterface.(*semantic.SemanticAction)
+	if !ok {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid action type")
+	}
+	return handleSemanticStoreImpl(c, action)
+}
+
+// handleSemanticRetrieve wraps the implementation to match ActionHandler signature
+func handleSemanticRetrieve(c echo.Context, actionInterface interface{}) error {
+	action, ok := actionInterface.(*semantic.SemanticAction)
+	if !ok {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid action type")
+	}
+	return handleSemanticRetrieveImpl(c, action)
 }
